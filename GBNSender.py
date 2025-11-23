@@ -1,95 +1,85 @@
 import socket
-import sys
+import random
 import time
+import os
 
-# super basic settings
-WINDOW_SIZE = 4        # GBN window size
-TIMEOUT = 2.0          # seconds
-RECV_BUF = 1024
+LOCAL_PORT = 12345
+MAX_PAYLOAD = 16
+OUTPUT_FILE = "COSC635_P2_DataRecieved.txt"
+SENT_FILE = "COSC635_P2_DataSent.txt"
 
-# make a very simple "packet": "seq|data"
-def make_packet(seq_num, data):
-    return f"{seq_num}|{data}".encode()
+loss_rate = int(input("Enter packet loss rate (0-99): "))
+print(f"Simulating {loss_rate}% packet loss on data packets...")
 
-def parse_ack(ack_bytes):
+random.seed(time.time())
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(("", LOCAL_PORT))
+sock.settimeout(1.0)
+
+print(f"GBN Receiver listening on port {LOCAL_PORT}")
+
+expected_seq = 0
+packets_received = 0
+packets_lost_simulated = 0
+data_bytes_received = 0
+
+f_out = open(OUTPUT_FILE, "wb")
+
+while True:
     try:
-        s = ack_bytes.decode().strip()
-        # expect "ACK <num>"
-        if s.startswith("ACK"):
-            parts = s.split()
-            if len(parts) == 2:
-                return int(parts[1])
-    except:
-        pass
-    return None
+        pkt, addr = sock.recvfrom(1024)
+    except socket.timeout:
+        continue
 
-def main():
-    if len(sys.argv) != 3:
-        print("usage: python gbn_sender.py <receiver_ip> <receiver_port>")
-        sys.exit(1)
+    if pkt == b"END":
+        print("Received END, closing.")
+        break
 
-    receiver_ip = sys.argv[1]
-    receiver_port = int(sys.argv[2])
-    addr = (receiver_ip, receiver_port)
+    r = random.randint(0, 99)
+    if r < loss_rate:
+        print("[LOSS] simulated drop of incoming data packet")
+        packets_lost_simulated += 1
+        # no ACK sent
+        continue
 
-    # data we want to send (each entry is one packet)
-    data_list = [
-        "packet 0 data",
-        "packet 1 data",
-        "packet 2 data",
-        "packet 3 data",
-        "packet 4 data",
-        "packet 5 data"
-    ]
+    packets_received += 1
 
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.settimeout(0.5)  # short recv timeout so we can check our timer
+    try:
+        header, payload = pkt.split(b"|", 1)
+        seq = int(header.decode().strip())
+    except Exception:
+        print("Malformed packet, ignoring.")
+        continue
 
-    base = 0              # first unACKed packet
-    next_seq = 0          # next seq number to send
-    n_packets = len(data_list)
-    timer_start = None
+    if seq == expected_seq:
+        f_out.write(payload)
+        data_bytes_received += len(payload)
+        expected_seq += 1
+        print(f"Accepted seq {seq}, wrote {len(payload)} bytes")
+    else:
+        print(f"Out-of-order or duplicate seq {seq}, expected {expected_seq}")
 
-    while base < n_packets:
-        # send new packets while window not full
-        while next_seq < base + WINDOW_SIZE and next_seq < n_packets:
-            pkt = make_packet(next_seq, data_list[next_seq])
-            sock.sendto(pkt, addr)
-            print("sent packet", next_seq)
-            if base == next_seq:
-                timer_start = time.time()
-            next_seq += 1
+    ack_msg = f"ACK {expected_seq}".encode()
+    sock.sendto(ack_msg, addr)
+    print(f"Sent ACK {expected_seq}")
 
-        # wait for ACK or timeout
-        try:
-            ack_bytes, _ = sock.recvfrom(RECV_BUF)
-            ack_num = parse_ack(ack_bytes)
-            if ack_num is not None:
-                print("received ACK for next expected =", ack_num)
-                # ack_num is "next expected", so base moves up to ack_num
-                if ack_num > base:
-                    base = ack_num
-                    # if all outstanding packets are ACKed, stop timer
-                    if base == next_seq:
-                        timer_start = None
-                    else:
-                        timer_start = time.time()
-        except socket.timeout:
-            # check for timeout of oldest unACKed
-            if timer_start is not None and (time.time() - timer_start) >= TIMEOUT:
-                print("timeout, resending window from", base, "to", next_seq - 1)
-                for seq in range(base, next_seq):
-                    pkt = make_packet(seq, data_list[seq])
-                    sock.sendto(pkt, addr)
-                    print("re-sent packet", seq)
-                timer_start = time.time()
+f_out.close()
 
-    # optional: tell receiver we are done
-    sock.sendto(b"END", addr)
-    print("all packets sent and ACKed, closing sender")
-    sock.close()
+print("\n--- GBN Receiver ---")
+print("Packets received (after sim loss):", packets_received)
+print("Simulated packet losses:", packets_lost_simulated)
+print("Data bytes received:", data_bytes_received)
+print("Output file:", OUTPUT_FILE)
 
-if __name__ == "__main__":
-    main()
+if os.path.exists(SENT_FILE):
+    sent_size = os.path.getsize(SENT_FILE)
+    recv_size = os.path.getsize(OUTPUT_FILE)
+    if sent_size == recv_size:
+        print(f"FILE INTEGRITY: PASS ({sent_size} bytes)")
+    else:
+        print(f"FILE INTEGRITY: FAIL (Sent: {sent_size}, Recv: {recv_size})")
+else:
+    print("Warning: Original file not found for comparison.")
 
-
+sock.close()
